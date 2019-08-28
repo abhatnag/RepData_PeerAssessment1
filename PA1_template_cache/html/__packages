@@ -1,0 +1,7 @@
+base
+xtable
+dplyr
+ggplot2
+kableExtra
+gridExtra
+lattice

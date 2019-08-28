@@ -1,0 +1,279 @@
+---
+title: "Reproducible Research: Peer Assessment 1"
+author: "Ayesha Bhatnagar"
+date: "August 27, 2019"
+output: 
+  html_document:
+    keep_md: true
+    fig_caption: yes
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE, warning=FALSE, message=FALSE)
+knitr::opts_chunk$set(tidy = TRUE)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=36))
+
+knitr::opts_chunk$set(size = "small")
+knitr::opts_hooks$set(fig.width = function(options) {
+  if (options$fig.width < options$fig.height) {
+    options$fig.width = options$fig.height
+  }
+  options
+})
+knitr::knit_hooks$set(mysize = function(before, options, envir) {
+  if (before) 
+    return(options$size)
+})
+```
+
+## Loading and preprocessing the data
+1. Read and Clean the data
+```{r read_data,cache=TRUE}
+act_df<-read.csv("data/activity.csv")
+str(act_df)
+```
+2. Study the data
+For `r length(unique(act_df$date)) ` days the data is collected in `r length(unique(act_df$interval)) ` intervals. There are  
+```{r summary_data, cache=TRUE}
+length(unique(act_df$interval))*length(unique(act_df$date))
+dim(act_df)
+library(xtable)
+xt<-xtable(summary(act_df))
+print(xt, type = "html")
+```
+## What is mean total number of steps taken per day?
+1. Use the dplyr library to group_by date and omit the NA
+```{r summary_stats, cache=TRUE, dependson='read_data'}
+library(dplyr)
+library(ggplot2)
+act_proc<- act_df %>% na.omit() %>% group_by(date) %>% summarise(median_daily_steps = ((steps[144]+steps[145])/2),steps_total = sum(steps), step_interval_count = n()) %>% mutate( mean_daily_steps = as.numeric(format(round(steps_total/step_interval_count, 2),2))
+)
+
+
+weekdays <- weekdays(Sys.Date()+0:6)[weekdays(Sys.Date()+0:6) != c("Saturday", "Sunday")]
+weekends <- weekdays(Sys.Date()+0:6)[weekdays(Sys.Date()+0:6) == c("Saturday", "Sunday")]
+
+act_df_weekday_label<-act_df %>% mutate( date_weekdays = if_else(weekdays(as.Date(act_df$date)) %in% weekdays, "weekdays",  if_else(weekdays(as.Date(act_df$date)) %in% weekends,"weekends","NONE" )))
+
+unique(act_df_weekday_label$date_weekdays) 
+
+unique(format(as.Date(act_df_weekday_label$date), '%A'))
+
+```
+2. Make a histogram of the total number of steps taken each day
+
+```{r histogram_non_imputed, echo=TRUE, cache=TRUE}
+df_hist1 <- act_df_weekday_label %>% group_by(date) %>% mutate(total_steps = sum(steps))
+g1<-ggplot(data = df_hist1)+geom_histogram(aes(total_steps, fill = date_weekdays ))+labs(title="Non-imputed Histogram")
+g1
+```
+3. Calculate and report the mean and median of the total number of steps taken per day
+
+```{r summary_table,cache=TRUE,  dependson='summary_stats'}
+library(kableExtra)
+act_proc %>% kable() %>%
+ kable_styling(bootstrap_options = c("striped", "hover", "condensed", full_width = F))
+# report the findings of act_proc in a table
+```
+## What is the average daily activity pattern?
+
+1. Make a time series plot of the 5-minute interval (x-axis) and the average number of steps taken, averaged across all days (y-axis)
+
+2. Which 5-minute interval, on average across all the days in the dataset, contains the maximum number of steps?
+```{r util_functions, echo=TRUE}
+
+find_max_stats<-function(df,col_idxs){
+  return(df[which(df[,col_idxs[2]] == max(df[,col_idxs[2]])),col_idxs])
+}
+
+```
+
+```{r interval_summaries, cache=TRUE, dependson=c('read_data','util_functions') }
+act_df_avgd = act_df %>% na.omit() %>% group_by(interval) %>% summarise(steps_total_interval = sum(steps), days_count = n() ) %>% mutate( mean_daily_steps = as.numeric(format(round(steps_total_interval/days_count, 2),2)))
+
+max_interval = find_max_stats(act_df_avgd,c(1,4))
+
+```
+
+```{r time_series_plot_5min_interval, dependson='interval_summaries', echo=TRUE, fig.width=7,fig.height=6,fig.cap="\\label{fig:figs}Time Series Plot of 5-minute interval"}
+require(ggplot2)
+require(gridExtra)
+require(lattice)
+
+# e <- ggplot(act_df_avgd, aes(x = interval, y = mean_daily_steps))+geom_line()+geom_point()+geom_vline(aes(xintercept = max_interval$interval), linetype = "dashed", size = 1, color = "firebrick1") +  annotate("text", x = 2+ max_interval$interval, y = max_interval$mean_daily_steps*1.05, label = max.step.text) 
+# e
+
+plot(y=act_df_avgd$mean_daily_steps,x=act_df_avgd$interval,xlab="Interval",ylab="Mean Steps per day", type="l", main='') 
+abline(v = max_interval$interval, h = max_interval$mean_daily_steps, col = "gray", lty = "dotted")
+text(2+ max_interval$interval, max_interval$mean_daily_steps, paste("Interval", max_interval$interval,"has max. steps at", max_interval$mean_daily_steps))
+ points(max_interval$interval, max_interval$mean_daily_steps, col = "firebrick1")
+
+```
+## Imputing missing values
+1. The total number of missing values in the dataset (i.e. the total number of rows with NAs) = `r length(which(is.na(act_df$steps)))`
+
+2. Strategy for filling in all of the missing values in the dataset. Implementing, nearest neighbor for filling in the NA by the average of the one previous and the one next day in the corresponding interval. 
+* Boundary conditions. If the first day has NAs, then impute from the first non-NA valued day from the future days. 
+* If the last day has NAs, then impute from the corresponding of the first previous day with non-NAs 
+```{r impute_functions, cache=TRUE, echo=TRUE}
+#start with the first row with NA
+df_imputed = act_df_weekday_label %>% group_by( dt=as.Date(date))
+max_rows<-dim(df_imputed)[1]
+
+
+impute_boundaries<-function(){
+   first<-df_imputed$dt[1]
+  df_first <- df_imputed[which(df_imputed$dt==first),c("interval","steps")]
+intervals_NA<-df_first$interval[which(is.na(df_first$steps))]
+
+if(length(intervals_NA) > 1){
+  for (j in row_number(intervals_NA)){
+     next.dt <- first+1
+     df_nxt <- df_imputed[which(df_imputed$dt==next.dt),c("interval","steps")]
+    
+ while(is.na(df_nxt$steps[j])){
+   next.dt <- next.dt+1
+    print(paste("Next Date: ",next.dt, " j = ",j))
+   df_nxt <- df_imputed[which(df_imputed$dt==next.dt),c("interval","steps")]
+   if(j ==10) break
+ }
+     df_first$steps[j] = df_nxt$steps[j]
+  }
+}
+df_imputed[which(df_imputed$dt==first),"steps"] <<- df_first[,"steps"]
+
+last_date<-max(df_imputed$dt)
+df_last <- df_imputed[which(df_imputed$dt==last_date),c("interval","steps")]
+intervals_NA<-df_last$interval[which(is.na(df_last$steps))]
+if(length(intervals_NA) > 1){
+  for (j in row_number(intervals_NA)){
+     prev.dt <- last_date-1
+     df_prev <- df_imputed[which(df_imputed$dt==prev.dt),c("interval","steps")]
+ while(is.na(df_prev$steps[j]) ){ #keep going back until there's a non-NA
+    prev.dt <-  prev.dt-1
+   df_prev <- df_imputed[which(df_imputed$dt==prev.dt),c("interval","steps")]
+    print(paste("inside second while ",length(is.na(df_prev$steps[j]))))
+ }
+     df_last$steps[j] = df_prev$steps[j]
+  }
+} #end if(intervals_NA
+df_imputed[which(df_imputed$dt==last_date),"steps"] <<- df_last[,"steps"]
+
+}
+
+impute_boundaries()
+
+impute_all<-function(){
+    #initially
+   for(i in 2:max_rows-1){
+     curr<-df_imputed$dt[i]
+     df_curr <- df_imputed[which(df_imputed$dt==curr),c("interval","steps")]
+     intervals_NA<-df_curr$interval[which(is.na(df_curr$steps))]
+    
+    if(length(intervals_NA) >= 1){ #imputing needed
+     prev <- curr-1
+     df_prev <- df_imputed[which(df_imputed$dt==prev),c("interval","steps")]
+ 
+     next.dt <- curr+1
+     df_nxt <- df_imputed[which(df_imputed$dt==next.dt),c("interval","steps")]
+     for (j in row_number(intervals_NA)){
+      
+       if (!is.na(df_prev$steps[j])) {  val1 = as.numeric(df_prev$steps[j]) }
+       else {val1 = 0}
+       if (!is.na(df_nxt$steps[j])) { val2 = as.numeric(df_nxt$steps[j] )} else{  val2 =  0 }
+       
+       if((val1 == 0) && (val2 == 0) ){ #special case: impute by the average of all days for that interval 
+         df_curr$steps[j] = act_df_avgd$mean_daily_steps[j]
+       }
+      else{ 
+   tryCatch({
+        df_curr$steps[j] = (val1+val2)/2.0
+}, error = function(err) {
+
+  # error handler picks up where error was generated
+  print(paste("MY_ERROR:  ",err))
+  print(paste("val1 =",val1," val2=",val2))
+
+
+}, finally = {
+
+}) # END tryCatch
+
+        }
+       
+     } #end for
+     #uncomment the print for debugging purposes only
+   #  print(paste("The NAs left = ", length(df_curr$steps[which(is.na(df_curr[,"steps"]))]) ))
+     df_imputed[which(df_imputed$dt==curr),"steps"] <<- df_curr$steps
+    }
+     
+   }
+}
+
+impute_all()
+```
+3. After imputing, the number of NAs must equal `r length(df_imputed$steps[which(is.na(df_imputed$steps))]) `
+
+A new dataset that is equal to the original dataset but with the missing data filled in is:
+`r str(df_imputed)`
+
+4. Make a histogram of the total number of steps taken each day and Calculate and report the mean and median total number of steps taken per day. Do these values differ from the estimates from the first part of the assignment? What is the impact of imputing missing data on the estimates of the total daily number of steps?
+
+```{r imputed_stats_analysis, echo=TRUE}
+df_imputed<-ungroup(df_imputed)
+df_imputed$steps <- as.numeric(df_imputed$steps)
+
+df_hist2 <- df_imputed %>% group_by(date) %>% mutate(total_steps = sum(steps))
+g2<-ggplot(data = df_hist2)+geom_histogram(aes(total_steps, fill=date_weekdays))+labs(title="Imputed Histogram")
+grid.arrange(g1, g2,nrow = 2,ncol=1)
+
+```
+There are differences in the *Mean Summaries* (mean and 3rd. Quartile) and *Median Summaries*  of the imputed dataframe. The table below highlights these. 
+```{r summary_diffs_imputed, echo=TRUE}
+df_imputed_summaries<- df_imputed %>% group_by(date) %>% summarise(median_daily_steps = ((steps[144]+steps[145])/2),steps_total = sum(steps), step_interval_count = n()) %>% mutate( mean_daily_steps = as.numeric(format(round(steps_total/step_interval_count, 2),2))
+)
+
+#Comparison between df_imputed_summaries and act_proc
+library(kableExtra)
+x<-summary(act_proc[,c("median_daily_steps","mean_daily_steps")]) %>% kable() %>%
+ kable_styling(bootstrap_options = c("striped", "hover", "condensed", full_width = F))
+add_header_above(x, c( "","Original Data" = 2))
+
+y<-summary(df_imputed_summaries[,c("median_daily_steps","mean_daily_steps")]) %>% kable() %>%
+ kable_styling(bootstrap_options = c("striped", "hover", "condensed", full_width = F))
+add_header_above(y, c( "","Imputed Data" = 2))
+```
+## Are there differences in activity patterns between weekdays and weekends?
+For this comparison lets take the imputed dataframe. For better exploration, using ggplot instead of the plot function in the graphics package.
+```{r weekend_weekday_stats, cache=TRUE, echo=TRUE}
+df_imputed<-ungroup(df_imputed)
+df_imputed$steps <- as.numeric(df_imputed$steps)
+
+days_grouped <- df_imputed %>% group_by(interval) 
+weekdays_only <- days_grouped %>% filter(date_weekdays =="weekdays")
+
+weekends_only <-  days_grouped %>% filter(date_weekdays =="weekends")
+
+weekdays_imputed_avgd = weekdays_only %>% group_by(interval) %>% summarise(steps_total_interval = sum(steps), days_count = n() ) %>% mutate( mean_daily_steps = as.numeric(format(round(steps_total_interval/days_count, 2),2)))
+
+
+weekends_imputed_avgd = weekends_only %>% group_by(interval) %>% summarise(steps_total_interval = sum(steps), days_count = n() ) %>% mutate( mean_daily_steps = as.numeric(format(round(steps_total_interval/days_count, 2),2)))
+
+max_interval_weekdays = find_max_stats(weekdays_imputed_avgd,c(1,4)) 
+max_interval_weekends = find_max_stats(weekends_imputed_avgd,c(1,4)) 
+
+```
+
+```{r weekend_weekday_plots, cache=TRUE, echo=TRUE}
+require(ggplot2)
+require(gridExtra)
+require(lattice)
+
+p1 <- ggplot(data = weekdays_imputed_avgd, aes(x=interval, y = mean_daily_steps))+geom_line()+labs(x="Interval", y= "Weekday Averages")+ geom_text( x= max_interval_weekdays$interval+1,y=max_interval_weekdays$mean_daily_steps+1,
+  aes(label =  paste("Interval", max_interval_weekdays$interval,"has max. steps at", max_interval_weekdays$mean_daily_steps)) )
+
+p2 <- ggplot(data = weekends_imputed_avgd, aes(x=interval, y = mean_daily_steps))+geom_line()+labs(x="Interval", y= "Weekend Averages")+ geom_text( x= max_interval_weekends$interval+1,y=max_interval_weekends$mean_daily_steps+1,
+  aes(label =  paste("Interval", max_interval_weekends$interval,"has max. steps at", max_interval_weekends$mean_daily_steps)) )
+
+grid.arrange(p1,p2, ncol=1)
+```
+
